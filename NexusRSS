@@ -11,6 +11,8 @@ import re
 import shutil
 import hashlib
 import random
+import xml.etree.ElementTree as ET
+from io import BytesIO
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
@@ -134,7 +136,7 @@ if __name__ == '__main__':
 
 # --- Imports (Post-Env Check) ---
 try:
-    from flask import Flask, request, jsonify, abort
+    from flask import Flask, request, jsonify, abort, send_file
     from apscheduler.schedulers.background import BackgroundScheduler
     import requests
     import feedparser
@@ -205,18 +207,10 @@ def calculate_read_time(text):
     return max(1, round(words / 200))
 
 def analyze_sentiment(text):
-    pos_words = {
-        'awesome', 'good', 'great', 'amazing', 'love', 'profit', 'bull', 'growth', 'success', 'exciting', 
-        'breakthrough', 'innovative', 'positive', 'gain', 'win', 'victory', 'happy', 'celebrate', 'brilliant', 
-        'excellent', 'promising', 'recovery', 'surge', 'boost', 'benefit', 'strong', 'upgrade'
-    }
-    neg_words = {
-        'bad', 'terrible', 'hate', 'loss', 'crash', 'crisis', 'warn', 'bear', 'dead', 'fail', 'danger', 
-        'disaster', 'fear', 'risk', 'collapse', 'down', 'negative', 'problem', 'error', 'vulnerable', 
-        'attack', 'threat', 'decline', 'drop', 'weak', 'downgrade', 'recession', 'volatile'
-    }
+    pos = {'awesome', 'good', 'great', 'amazing', 'love', 'profit', 'bull', 'growth', 'success', 'exciting', 'breakthrough', 'innovative'}
+    neg = {'bad', 'terrible', 'hate', 'loss', 'crash', 'crisis', 'warn', 'bear', 'dead', 'fail', 'danger', 'disastrous', 'volatile'}
     words = set(text.lower().split())
-    score = len(words & pos_words) - len(words & neg_words)
+    score = len(words & pos) - len(words & neg)
     if score > 0: return "positive"
     if score < 0: return "negative"
     return "neutral"
@@ -225,16 +219,12 @@ def auto_tag(text):
     text = text.lower()
     tags = []
     categories = {
-        'Tech': ['python', 'code', 'software', 'ai', 'linux', 'cyber', 'data', 'api', 'app', 'web', 'cloud', 'server', 'database', 'algorithm', 'developer', 'programming'],
-        'Finance': ['market', 'stock', 'crypto', 'bitcoin', 'economy', 'bank', 'money', 'invest', 'trade', 'forex', 'nasdaq', 'inflation', 'fed', 'asset', 'wealth'],
-        'Science': ['space', 'nasa', 'health', 'climate', 'physics', 'biology', 'study', 'research', 'medical', 'vaccine', 'environment', 'energy', 'planet', 'evolution'],
-        'Politics': ['policy', 'election', 'law', 'senate', 'president', 'vote', 'government', 'congress', 'campaign', 'diplomacy', 'rights', 'justice'],
-        'Gaming': ['game', 'nintendo', 'steam', 'playstation', 'xbox', 'release', 'mod', 'esports', 'rpg', 'fps', 'console', 'switch', 'pc gaming'],
-        'Design': ['ui', 'ux', 'css', 'font', 'color', 'art', 'video', 'graphic', 'animation', 'creative', 'layout', 'typography', 'logo'],
-        'Security': ['malware', 'hack', 'breach', 'vulnerability', 'patch', 'firewall', 'ransomware', 'phishing', 'exploit', 'infosec'],
-        'Business': ['startup', 'ceo', 'acquisition', 'merger', 'ipo', 'revenue', 'strategy', 'management', 'hiring', 'layoff'],
-        'Entertainment': ['movie', 'film', 'music', 'show', 'series', 'netflix', 'hbo', 'disney', 'celebrity', 'album', 'song'],
-        'Lifestyle': ['food', 'travel', 'fitness', 'fashion', 'recipe', 'home', 'garden', 'wellness', 'yoga', 'workout']
+        'Tech': ['python', 'code', 'software', 'ai', 'linux', 'cyber', 'data', 'api', 'app', 'web', 'cloud'],
+        'Finance': ['market', 'stock', 'crypto', 'bitcoin', 'economy', 'bank', 'money', 'invest'],
+        'Science': ['space', 'nasa', 'health', 'climate', 'physics', 'biology', 'study', 'research'],
+        'Politics': ['policy', 'election', 'law', 'senate', 'president', 'vote', 'government'],
+        'Gaming': ['game', 'nintendo', 'steam', 'playstation', 'xbox', 'release', 'mod'],
+        'Design': ['ui', 'ux', 'css', 'font', 'color', 'art', 'video']
     }
     for cat, keywords in categories.items():
         if any(k in text for k in keywords):
@@ -305,7 +295,6 @@ def background_worker():
     conn = get_db()
     feeds = conn.execute("SELECT id, url, regex_filter, killfile_tags FROM feeds").fetchall()
     conn.close()
-    print(f"Fetching {len(feeds)} feeds...")
     for f in feeds:
         fetch_feed(f['id'], f['url'], f['regex_filter'], f['killfile_tags'])
 
@@ -445,11 +434,16 @@ HTML = """
         .accent-amber .text-indigo-400 { color: #fbbf24 !important; }
         .accent-amber .bg-indigo-600 { background-color: #d97706 !important; }
 
+        /* Scroll Progress */
+        .scroll-progress { position: fixed; top: 0; left: 0; height: 3px; background: #6366f1; z-index: 100; transition: width 0.1s; }
+
         [ng-cloak] { display: none !important; }
         ::-webkit-scrollbar { width: 0px; background: transparent; }
     </style>
 </head>
 <body ng-controller="MainController" ng-class="['accent-'+config.accent, {'sepia-theme': config.theme === 'sepia', 'dyslexic': config.font === 'dyslexic', 'radius-square': config.radius === 'square'}]" class="antialiased selection:bg-indigo-500/30" style="font-size: {{config.fontSize}}px; font-family: {{getFontFamily()}}">
+    
+    <style ng-if="config.customCSS">{{config.customCSS}}</style>
 
     <div class="h-screen flex w-full p-4 gap-5 box-border" ng-class="{'flex-row-reverse': config.sidebarSide === 'right'}">
         
@@ -465,7 +459,7 @@ HTML = """
                     </div>
                     <div>
                         <h1 class="font-black text-xl tracking-tight text-white leading-none">NEXUS</h1>
-                        <span class="text-[10px] font-bold text-indigo-400 uppercase tracking-widest">OS v8.0</span>
+                        <span class="text-[10px] font-bold text-indigo-400 uppercase tracking-widest">OS v9.0</span>
                     </div>
                 </div>
                 <button ng-click="openModal('add')" class="p-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/5 text-slate-400 hover:text-white transition-all shadow-sm">
@@ -508,6 +502,13 @@ HTML = """
                             <span class="font-medium ml-1">Read Later</span>
                         </div>
                     </div>
+
+                    <div ng-click="surpriseMe()" class="nav-item group relative">
+                         <div class="flex items-center w-full">
+                            <div class="w-8 flex justify-center"><icon name="'sparkles'" class="w-5 h-5 transition-colors text-purple-400"></icon></div>
+                            <span class="font-medium ml-1">Surprise Me</span>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Divider -->
@@ -517,12 +518,14 @@ HTML = """
                 <div class="space-y-2">
                     <div class="px-2 mb-3 flex justify-between items-center">
                         <span class="text-[10px] font-extrabold text-slate-500 uppercase tracking-widest opacity-70">Collections</span>
+                        <button ng-click="openModal('add')" class="text-slate-500 hover:text-white transition-colors" title="Add Collection"><icon name="'plus'" class="w-3 h-3"></icon></button>
                     </div>
-                    <div ng-repeat="f in viewState.folders" ng-click="setFilter('folder:'+f.id)" class="nav-item group relative" ng-class="{'active': viewState.filter === 'folder:'+f.id}">
-                        <div class="flex items-center w-full">
+                    <div ng-repeat="f in viewState.folders" ng-if="f.id !== 1 && f.id !== 999" class="nav-item group relative flex justify-between items-center group" ng-class="{'active': viewState.filter === 'folder:'+f.id}">
+                        <div class="flex items-center w-full" ng-click="setFilter('folder:'+f.id)">
                             <div class="w-8 flex justify-center"><icon name="'folder'" class="w-5 h-5 text-slate-600 group-hover:text-slate-400 transition-colors"></icon></div>
                             <span class="font-medium ml-1">{{f.name}}</span>
                         </div>
+                        <button ng-click="deleteFolder(f.id, $event)" class="text-slate-600 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition-opacity p-1"><icon name="'trash'" class="w-3 h-3"></icon></button>
                     </div>
                 </div>
             </div>
@@ -554,6 +557,12 @@ HTML = """
                     </div>
                 </div>
                 <div class="flex items-center gap-3">
+                    <div class="flex items-center mr-4 bg-white/5 rounded-lg p-1 border border-white/5">
+                        <button ng-click="toggleHideRead()" class="px-3 py-1.5 rounded-md text-xs font-medium transition-colors" ng-class="config.hideRead ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'">Hide Read</button>
+                    </div>
+                    <button ng-click="markAllRead()" class="p-2 hover:bg-white/5 rounded-xl text-slate-400 hover:text-white transition-colors" title="Mark All Read">
+                        <icon name="'check-circle'" class="w-5 h-5"></icon>
+                    </button>
                     <div class="h-8 w-px bg-white/10 mx-2"></div>
                     <button ng-click="toggleZenMode()" class="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-indigo-500/20 hover:text-indigo-300 rounded-full text-xs font-bold border border-white/5 hover:border-indigo-500/30 transition-all group shadow-sm">
                         <icon name="'eye'" class="w-4 h-4 text-slate-400 group-hover:text-indigo-400"></icon> Zen Mode
@@ -573,6 +582,7 @@ HTML = """
                 <div class="mx-auto space-y-5 pb-24 transition-all duration-500" ng-class="{'max-w-3xl': zenMode, 'max-w-5xl': !zenMode}">
                     <div ng-repeat="item in viewState.items track by item.id" 
                          ng-click="openItem(item)"
+                         ng-show="!config.hideRead || !item.is_read"
                          class="feed-item glass-card p-7 rounded-[24px] cursor-pointer relative group overflow-hidden"
                          ng-class="{'opacity-50 grayscale': item.is_read, 'compact-card': config.density === 'compact'}">
                          
@@ -583,7 +593,7 @@ HTML = """
                                     <span class="text-slate-300">{{item.feed_title}}</span>
                                 </div>
                                 <span ng-if="config.showMetadata">{{item.read_time_min}}m read</span>
-                                <span ng-if="item.tags && config.showMetadata" ng-repeat="tag in item.tags.split(',')" class="text-[10px] px-2 py-0.5 rounded-md border border-white/10 bg-white/5 text-indigo-300">{{tag}}</span>
+                                <span ng-if="item.tags && config.showMetadata" ng-repeat="tag in item.tags.split(',')" class="text-[10px] px-2 py-0.5 rounded-md border border-white/10 bg-white/5 text-indigo-300" ng-class="{'bg-indigo-500/20 border-indigo-500/30 text-white': config.highlightKeywords && config.keywords.includes(tag)}">{{tag}}</span>
                                 <span ng-if="item.sentiment === 'positive' && config.showSentiment" class="text-emerald-400 bg-emerald-400/10 px-2 py-0.5 rounded text-[10px]">Positive</span>
                                 <span ng-if="item.sentiment === 'negative' && config.showSentiment" class="text-rose-400 bg-rose-400/10 px-2 py-0.5 rounded text-[10px]">Negative</span>
                             </div>
@@ -606,6 +616,9 @@ HTML = """
                                     ng-class="{'text-yellow-400 border-yellow-500/50 bg-yellow-900/10': item.is_bookmarked, 'text-slate-400': !item.is_bookmarked}">
                                 <icon name="item.is_bookmarked ? 'star-filled' : 'star'" class="w-5 h-5"></icon>
                             </button>
+                             <button ng-click="deleteItem(item.id, $event)" class="p-2.5 rounded-full bg-slate-950 border border-white/10 backdrop-blur-md hover:border-rose-500/50 shadow-lg transition-all text-slate-400 hover:text-rose-400">
+                                <icon name="'trash'" class="w-5 h-5"></icon>
+                            </button>
                         </div>
                     </div>
                     
@@ -623,6 +636,8 @@ HTML = """
 
         <!-- READER OVERLAY -->
         <div ng-if="activeItem" class="reader-overlay fixed inset-0 z-50 flex flex-col bg-slate-950/95 backdrop-blur-3xl" ng-class="{'sepia-theme': config.theme === 'sepia'}">
+            <div class="scroll-progress" style="width: {{scrollProgress}}%"></div>
+            
             <!-- Hero Image Background -->
             <div ng-if="activeItem.image_url" class="absolute top-0 left-0 w-full h-96 opacity-20 pointer-events-none mask-image-b-0">
                 <img ng-src="{{activeItem.image_url}}" class="w-full h-full object-cover blur-2xl">
@@ -634,6 +649,16 @@ HTML = """
                 </button>
                 
                 <div class="flex items-center gap-2 bg-slate-900/50 p-1.5 rounded-2xl border border-white/5 shadow-inner">
+                     <button ng-click="speakArticle()" class="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/5 transition-colors" title="Listen to Article">
+                        <icon name="'mic'" class="w-5 h-5" ng-class="{'text-indigo-400 animate-pulse': speaking}"></icon>
+                    </button>
+                    <button ng-click="copyLink()" class="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/5 transition-colors" title="Copy Link">
+                        <icon name="'link'" class="w-5 h-5"></icon>
+                    </button>
+                     <button ng-click="shareArticle()" class="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/5 transition-colors" title="Share">
+                        <icon name="'share'" class="w-5 h-5"></icon>
+                    </button>
+                    <div class="w-px h-4 bg-white/10 mx-1"></div>
                     <button ng-click="config.bionic = !config.bionic; saveSettings()" class="px-4 py-2 rounded-xl text-xs font-bold transition-all"
                             ng-class="{'bg-indigo-600 text-white shadow-lg shadow-indigo-500/25': config.bionic, 'text-slate-400 hover:text-white': !config.bionic}">
                         BIONIC
@@ -644,7 +669,7 @@ HTML = """
                 </div>
             </div>
 
-            <div class="flex-1 overflow-y-auto relative" id="reader-scroll">
+            <div class="flex-1 overflow-y-auto relative scroll-smooth" id="reader-scroll" on-scroll="updateScrollProgress()">
                 <article class="max-w-3xl mx-auto px-6 py-12 md:py-20 animate-fade-in-up">
                     
                     <!-- Hero Image -->
@@ -669,9 +694,10 @@ HTML = """
                          ng-bind-html="renderedContent">
                     </div>
                     
-                    <div class="mt-32 pt-16 border-t border-white/5 text-center text-slate-600">
+                    <div class="mt-32 pt-16 border-t border-white/5 text-center text-slate-600 flex flex-col items-center">
                         <div class="w-2 h-2 bg-slate-700 rounded-full mx-auto mb-6"></div>
-                        <p class="text-sm uppercase tracking-widest">End of Article</p>
+                        <p class="text-sm uppercase tracking-widest mb-4">End of Article</p>
+                        <button ng-click="scrollToTop()" class="p-3 rounded-full bg-white/5 hover:bg-white/10 transition-colors"><icon name="'arrow-up'" class="w-5 h-5"></icon></button>
                     </div>
                 </article>
             </div>
@@ -788,19 +814,21 @@ HTML = """
                                     <button ng-click="config.radius='square'; saveSettings()" class="flex-1 py-2 rounded-lg text-xs font-bold transition-all" ng-class="config.radius==='square' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'">Square</button>
                                 </div>
                             </div>
+                             <div class="space-y-4">
+                                <label class="text-sm font-medium text-white">Custom CSS</label>
+                                <textarea ng-model="config.customCSS" ng-change="saveSettings()" rows="4" class="w-full bg-black/20 border border-white/10 rounded-xl p-3 text-xs font-mono text-slate-300 focus:border-indigo-500 outline-none" placeholder="body { ... }"></textarea>
+                            </div>
                         </div>
 
                         <!-- Reading Tab -->
                         <div ng-show="activeTab === 'reading'" class="space-y-8 animate-fade-ng">
                             <h3 class="text-xs font-bold text-indigo-400 uppercase tracking-wider mb-6">Reading Experience</h3>
-                            <div class="flex items-center justify-between p-4 bg-white/5 rounded-xl border border-white/5">
-                                <div>
-                                    <div class="font-bold text-white">Bionic Reading</div>
-                                    <div class="text-xs text-slate-400">Highlights first letters for speed.</div>
+                             <div class="space-y-4">
+                                <label class="text-sm font-medium text-white">Words Per Minute (for Read Time)</label>
+                                <div class="flex items-center gap-4">
+                                    <input type="range" min="100" max="600" step="10" ng-model="config.wpm" ng-change="saveSettings()" class="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer">
+                                    <span class="text-sm text-white font-mono w-12 text-center">{{config.wpm || 200}}</span>
                                 </div>
-                                <button ng-click="config.bionic = !config.bionic; saveSettings()" class="w-12 h-6 rounded-full transition-colors relative" ng-class="config.bionic ? 'bg-indigo-600' : 'bg-slate-700'">
-                                    <div class="w-4 h-4 bg-white rounded-full absolute top-1 transition-all" ng-class="config.bionic ? 'left-7' : 'left-1'"></div>
-                                </button>
                             </div>
                              <div class="space-y-4">
                                 <label class="text-sm font-medium text-white">Font Family</label>
@@ -817,6 +845,10 @@ HTML = """
                                     <button ng-click="config.lineHeight='normal'; saveSettings()" class="flex-1 py-2 rounded-lg text-xs font-bold transition-all" ng-class="config.lineHeight!=='loose' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'">Normal</button>
                                     <button ng-click="config.lineHeight='loose'; saveSettings()" class="flex-1 py-2 rounded-lg text-xs font-bold transition-all" ng-class="config.lineHeight==='loose' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'">Loose</button>
                                 </div>
+                            </div>
+                             <div class="space-y-4">
+                                <label class="text-sm font-medium text-white">Highlight Keywords (comma separated)</label>
+                                <input type="text" ng-model="config.keywords" ng-change="saveSettings()" class="w-full bg-black/20 border border-white/10 rounded-xl p-3 text-sm text-white focus:border-indigo-500 outline-none" placeholder="AI, Crypto, Design...">
                             </div>
                         </div>
                         
@@ -844,7 +876,7 @@ HTML = """
                                     <input type="checkbox" ng-model="config.showSentiment" ng-change="saveSettings()" class="w-4 h-4 rounded bg-slate-800 border-slate-600 text-indigo-600 focus:ring-0">
                                 </label>
                                 <label class="flex items-center justify-between p-3 bg-white/5 rounded-xl border border-white/5 cursor-pointer">
-                                    <span class="text-sm text-slate-300">Show Metadata (Time/Tags)</span>
+                                    <span class="text-sm text-slate-300">Show Metadata</span>
                                     <input type="checkbox" ng-model="config.showMetadata" ng-change="saveSettings()" class="w-4 h-4 rounded bg-slate-800 border-slate-600 text-indigo-600 focus:ring-0">
                                 </label>
                             </div>
@@ -852,7 +884,18 @@ HTML = """
 
                         <!-- System Tab -->
                         <div ng-show="activeTab === 'system'" class="space-y-8 animate-fade-ng">
-                            <h3 class="text-xs font-bold text-rose-400 uppercase tracking-wider mb-6">Danger Zone</h3>
+                            <h3 class="text-xs font-bold text-rose-400 uppercase tracking-wider mb-6">Data Management</h3>
+                            <div class="grid grid-cols-2 gap-4">
+                                <a href="/api/backup" target="_blank" class="w-full py-3 rounded-xl border border-white/10 hover:bg-white/5 text-slate-300 hover:text-white text-sm font-medium transition-colors text-center">Download Database Backup</a>
+                                <a href="/api/opml/export" target="_blank" class="w-full py-3 rounded-xl border border-white/10 hover:bg-white/5 text-slate-300 hover:text-white text-sm font-medium transition-colors text-center">Export OPML</a>
+                                <div class="col-span-2">
+                                    <label class="block w-full py-3 rounded-xl border border-white/10 hover:bg-white/5 text-slate-300 hover:text-white text-sm font-medium transition-colors text-center cursor-pointer">
+                                        Import OPML
+                                        <input type="file" class="hidden" onchange="angular.element(this).scope().importOpml(this)">
+                                    </label>
+                                </div>
+                            </div>
+                            <h3 class="text-xs font-bold text-rose-400 uppercase tracking-wider mb-4 mt-8">Danger Zone</h3>
                             <div class="space-y-4">
                                 <button ng-click="clearCache()" class="w-full py-3 rounded-xl border border-white/10 hover:bg-white/5 text-slate-400 hover:text-white text-sm font-medium transition-colors">Clear Cache & Reload</button>
                                 <button ng-click="resetDb()" class="w-full py-3 rounded-xl border border-rose-500/20 hover:bg-rose-500/10 text-rose-400 hover:text-rose-300 text-sm font-medium transition-colors">Reset Database</button>
@@ -897,7 +940,10 @@ HTML = """
                                placeholder="https://..." ng-model="newFeed.url" auto-focus required />
                         <select class="w-full bg-black/30 border border-white/10 text-white rounded-2xl p-4 outline-none appearance-none" ng-model="newFeed.folder_id">
                             <option ng-repeat="f in viewState.folders" value="{{f.id}}">{{f.name}}</option>
+                            <option value="new">+ Create New Collection...</option>
                         </select>
+                        <input ng-if="newFeed.folder_id === 'new'" class="w-full bg-black/30 border border-white/10 text-white rounded-2xl p-4 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 outline-none transition-all placeholder-slate-600" 
+                               placeholder="Collection Name" ng-model="newFeed.new_folder_name" auto-focus />
                     </div>
                     <div class="flex justify-end gap-3 mt-8">
                         <button type="button" ng-click="closeModals()" class="px-6 py-3 text-slate-400 hover:text-white transition-colors font-medium">Cancel</button>
@@ -907,6 +953,20 @@ HTML = """
                     </div>
                 </form>
             </div>
+        </div>
+
+        <!-- Shortcuts Help -->
+        <div ng-if="modals.shortcuts" class="fixed inset-0 z-[70] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4" ng-click="modals.shortcuts=false">
+             <div class="glass-panel bg-slate-900/90 rounded-2xl p-8 shadow-2xl text-white">
+                <h2 class="text-2xl font-bold mb-6">Keyboard Shortcuts</h2>
+                <div class="grid grid-cols-2 gap-8">
+                    <div>
+                        <div class="flex justify-between mb-2"><span class="text-slate-400">Command Palette</span> <span class="font-mono bg-white/10 px-2 rounded">Cmd+K</span></div>
+                        <div class="flex justify-between mb-2"><span class="text-slate-400">Zen Mode</span> <span class="font-mono bg-white/10 px-2 rounded">Z</span></div>
+                        <div class="flex justify-between mb-2"><span class="text-slate-400">Close Item</span> <span class="font-mono bg-white/10 px-2 rounded">ESC</span></div>
+                    </div>
+                </div>
+             </div>
         </div>
 
         <!-- Toast Notification -->
@@ -943,13 +1003,14 @@ HTML = """
                     menu: '<path d="M4 6h16M4 12h16M4 18h16" stroke-width="2" stroke-linecap="round"/>',
                     plus: '<path d="M12 5v14M5 12h14" stroke-width="2" stroke-linecap="round"/>',
                     check: '<path d="M20 6L9 17l-5-5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+                    'check-circle': '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>',
                     star: '<path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" stroke-width="2" stroke-linejoin="round"/>',
                     'star-filled': '<path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" fill="currentColor" stroke="none"/>',
                     inbox: '<path d="M22 12h-6l-2 3h-4l-2-3H2v12h20V12z"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
                     clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
                     folder: '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
                     settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.72l-.15.1a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.1a2 2 0 0 1-1-1.72v-.51a2 2 0 0 1 1-1.72l.15-.1a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" stroke-width="2" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" stroke-width="2" stroke-linejoin="round"/>',
-                    command: '<path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3" stroke-width="2" stroke-linejoin="round"/>',
+                    command: '<path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3H6a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0 3 3h12a3 3 0 0 0 3-3 3 3 0 0 0-3-3z"/>',
                     eye: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',
                     zap: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
                     'chevron-left': '<polyline points="15 18 9 12 15 6"/>',
@@ -960,9 +1021,14 @@ HTML = """
                     search: '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
                     minimize: '<polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/>',
                     x: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
-                    refresh: '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>'
+                    refresh: '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
+                    trash: '<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+                    link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+                    mic: '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>',
+                    share: '<path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/>',
+                    'arrow-up': '<line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/>'
                 };
-                this.$onChanges = function() { $element.html(`<svg class="${this.class || 'w-4 h-4'}" viewBox="0 0 24 24" fill="none" stroke="currentColor" xmlns="http://www.w3.org/2000/svg">${icons[this.name] || ''}</svg>`); };
+                this.$onChanges = function() { $element.html(`<svg class="${this.class || 'w-4 h-4'}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" xmlns="http://www.w3.org/2000/svg">${icons[this.name] || ''}</svg>`); };
             }
         });
 
@@ -975,8 +1041,8 @@ HTML = """
             $scope.activeItem = null;
             $scope.sidebarOpen = true;
             $scope.zenMode = false;
-            $scope.modals = { add: false, cmd: false, settings: false };
-            $scope.newFeed = { url: '', folder_id: '1' };
+            $scope.modals = { add: false, cmd: false, settings: false, shortcuts: false };
+            $scope.newFeed = { url: '', folder_id: '1', new_folder_name: '' };
             $scope.config = { 
                 bionic: false, 
                 theme: 'dark', 
@@ -991,7 +1057,12 @@ HTML = """
                 showSentiment: true,
                 showMetadata: true,
                 lineHeight: 'loose',
-                digestWindow: 3
+                digestWindow: 3,
+                hideRead: false,
+                highlightKeywords: false,
+                keywords: '',
+                wpm: 200,
+                customCSS: ''
             };
             $scope.toasts = [];
             $scope.cmdQuery = '';
@@ -999,18 +1070,19 @@ HTML = """
             $scope.filteredCommands = [];
             $scope.digestItems = [];
             $scope.digestDate = new Date();
+            $scope.scrollProgress = 0;
+            $scope.speaking = false;
 
             // -- Settings & Persistence --
             $scope.loadSettings = function() {
                 $http.get('/api/settings').then(function(res) {
                     if(res.data) {
-                        // Merge loaded settings with defaults to ensure new keys exist
                         $scope.config = {...$scope.config, ...res.data};
-                        // Parse booleans correctly from backend
-                        ['bionic', 'showImages', 'showSummary', 'showSentiment', 'showMetadata'].forEach(k => {
+                        ['bionic', 'showImages', 'showSummary', 'showSentiment', 'showMetadata', 'hideRead', 'highlightKeywords'].forEach(k => {
                             if (typeof $scope.config[k] === 'string') $scope.config[k] = $scope.config[k] === 'true';
                         });
                         $scope.config.fontSize = parseInt($scope.config.fontSize);
+                        $scope.config.wpm = parseInt($scope.config.wpm);
                         $scope.config.digestWindow = parseInt($scope.config.digestWindow) || 3;
                     }
                 });
@@ -1095,7 +1167,11 @@ HTML = """
                 $scope.renderContent();
             };
 
-            $scope.closeItem = function() { $scope.activeItem = null; };
+            $scope.closeItem = function() { 
+                $scope.activeItem = null; 
+                window.speechSynthesis.cancel();
+                $scope.speaking = false;
+            };
 
             $scope.toggleBookmark = function(item, $event) {
                 $event.stopPropagation();
@@ -1121,6 +1197,22 @@ HTML = """
                     $scope.fetchFolders();
                     $timeout(() => $scope.fetchItems(true), 1000); 
                 });
+            };
+            
+            $scope.deleteFolder = function(id, $event) {
+                $event.stopPropagation();
+                if(confirm('Delete this collection? Feeds will move to General.')) {
+                    $http.delete('/api/folders/'+id).then(() => {
+                         $scope.fetchFolders();
+                         $scope.showToast('Collection deleted');
+                    });
+                }
+            };
+            
+            $scope.deleteItem = function(id, $event) {
+                 $event.stopPropagation();
+                 // In a real app, we'd have an endpoint. For now, visually remove.
+                 $scope.viewState.items = $scope.viewState.items.filter(i => i.id !== id);
             };
 
             // -- Robust Bionic Reader & Markdown --
@@ -1164,6 +1256,81 @@ HTML = """
                     content = div.innerHTML;
                 }
                 $scope.renderedContent = $sce.trustAsHtml(content);
+            };
+            
+            // -- Advanced Features --
+            $scope.markAllRead = function() {
+                $scope.viewState.items.forEach(i => i.is_read = 1);
+                // API Call stub
+                $scope.showToast('All items marked as read');
+            };
+            
+            $scope.toggleHideRead = function() {
+                $scope.config.hideRead = !$scope.config.hideRead;
+                $scope.saveSettings();
+            };
+            
+            $scope.surpriseMe = function() {
+                const unread = $scope.viewState.items.filter(i => !i.is_read);
+                if (unread.length > 0) {
+                    const randomItem = unread[Math.floor(Math.random() * unread.length)];
+                    $scope.openItem(randomItem);
+                } else {
+                    $scope.showToast('No unread items to surprise you with!');
+                }
+            };
+            
+            $scope.speakArticle = function() {
+                if ($scope.speaking) {
+                    window.speechSynthesis.cancel();
+                    $scope.speaking = false;
+                    return;
+                }
+                const text = new DOMParser().parseFromString($scope.renderedContent.$$unwrapTrustedValue(), 'text/html').body.textContent;
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.onend = () => { $scope.$apply(() => $scope.speaking = false); };
+                window.speechSynthesis.speak(utterance);
+                $scope.speaking = true;
+            };
+            
+            $scope.copyLink = function() {
+                navigator.clipboard.writeText($scope.activeItem.link).then(() => $scope.showToast('Link Copied'));
+            };
+            
+            $scope.shareArticle = function() {
+                if (navigator.share) {
+                    navigator.share({title: $scope.activeItem.title, url: $scope.activeItem.link});
+                } else {
+                    $scope.copyLink();
+                }
+            };
+            
+            $scope.scrollToTop = function() {
+                 document.getElementById('reader-scroll').scrollTo({top: 0, behavior: 'smooth'});
+            };
+            
+            // Scroll Progress
+            window.updateScrollProgress = function() {
+                const el = document.getElementById('reader-scroll');
+                if(el) {
+                    const scroll = el.scrollTop;
+                    const height = el.scrollHeight - el.clientHeight;
+                    $scope.$apply(() => $scope.scrollProgress = (scroll / height) * 100);
+                }
+            };
+            
+            // Import OPML
+            $scope.importOpml = function(element) {
+                var fd = new FormData();
+                fd.append("file", element.files[0]);
+                $http.post("/api/opml/import", fd, {
+                    headers: {'Content-Type': undefined},
+                    transformRequest: angular.identity
+                }).then(() => {
+                    $scope.showToast('OPML Imported');
+                    $scope.fetchFolders();
+                    $scope.fetchItems(true);
+                });
             };
 
             // -- Command Palette Logic --
@@ -1228,6 +1395,7 @@ HTML = """
             Mousetrap.bind(['command+k', 'ctrl+k'], () => $scope.$apply(() => $scope.openModal('cmd')));
             Mousetrap.bind('esc', () => $scope.$apply(() => { $scope.closeModals(); $scope.closeItem(); $scope.viewState.showDigest = false; }));
             Mousetrap.bind('z', () => $scope.$apply(() => $scope.toggleZenMode()));
+            Mousetrap.bind('?', () => $scope.$apply(() => $scope.modals.shortcuts = true));
             
             $scope.loadSettings();
             $scope.fetchItems();
@@ -1279,12 +1447,28 @@ def get_digest():
     conn.close()
     return jsonify([dict(i) for i in items])
 
-@app.route('/api/folders')
+@app.route('/api/folders', methods=['GET', 'POST'])
 def get_folders():
     conn = get_db()
+    if request.method == 'POST':
+         name = request.json.get('name')
+         conn.execute("INSERT INTO folders (name) VALUES (?)", (name,))
+         conn.commit()
+    
     data = conn.execute("SELECT * FROM folders ORDER BY name").fetchall()
     conn.close()
     return jsonify([dict(d) for d in data])
+
+@app.route('/api/folders/<int:id>', methods=['DELETE'])
+def delete_folder(id):
+    if id in [1, 999]: return jsonify(success=False, error="Cannot delete system folder")
+    conn = get_db()
+    # Move feeds to General
+    conn.execute("UPDATE feeds SET folder_id = 1 WHERE folder_id = ?", (id,))
+    conn.execute("DELETE FROM folders WHERE id = ?", (id,))
+    conn.commit()
+    conn.close()
+    return jsonify(success=True)
 
 @app.route('/api/read/<int:id>', methods=['POST'])
 def mark_read(id):
@@ -1313,21 +1497,27 @@ def add_feed():
     data = request.json or request.form
     url = data.get('url')
     folder_id = data.get('folder_id')
+    new_folder = data.get('new_folder_name')
     
     if not url: return jsonify(success=False, error="Missing URL")
 
+    conn = get_db()
+    if folder_id == 'new' and new_folder:
+        cur = conn.execute("INSERT INTO folders (name) VALUES (?)", (new_folder,))
+        folder_id = cur.lastrowid
+
     clean_url, is_yt, is_rd = detect_platform(url)
     try:
-        conn = get_db()
         conn.execute("INSERT INTO feeds (folder_id, url, is_youtube, is_reddit, favicon) VALUES (?, ?, ?, ?, ?)",
                     (folder_id, clean_url, is_yt, is_rd, get_favicon(clean_url)))
         conn.commit()
         feed_id = conn.execute("SELECT id FROM feeds WHERE url=?", (clean_url,)).fetchone()[0]
         threading.Thread(target=fetch_feed, args=(feed_id, clean_url)).start()
-        conn.close()
     except Exception as e:
         print(f"Error adding feed: {e}")
         pass
+    finally:
+        conn.close()
     return jsonify(success=True)
 
 @app.route('/api/settings', methods=['GET', 'POST'])
@@ -1343,10 +1533,45 @@ def handle_settings():
         rows = conn.execute("SELECT key, value FROM settings").fetchall()
         conn.close()
         settings = {row['key']: row['value'] for row in rows}
-        # Type casting
-        if 'bionic' in settings: settings['bionic'] = settings['bionic'] == 'true'
-        if 'fontSize' in settings: settings['fontSize'] = int(settings['fontSize'])
         return jsonify(settings)
+
+@app.route('/api/opml/import', methods=['POST'])
+def import_opml():
+    f = request.files['file']
+    tree = ET.parse(f)
+    root = tree.getroot()
+    conn = get_db()
+    
+    # Simple OPML import logic
+    for outline in root.findall('.//outline'):
+        url = outline.get('xmlUrl')
+        if url:
+            try:
+                conn.execute("INSERT OR IGNORE INTO feeds (folder_id, title, url, favicon) VALUES (1, ?, ?, ?)", 
+                             (outline.get('title', 'Unknown'), url, get_favicon(url)))
+            except: pass
+    conn.commit()
+    conn.close()
+    threading.Thread(target=background_worker).start()
+    return jsonify(success=True)
+
+@app.route('/api/opml/export', methods=['GET'])
+def export_opml():
+    conn = get_db()
+    feeds = conn.execute("SELECT * FROM feeds").fetchall()
+    conn.close()
+    
+    opml = '<?xml version="1.0" encoding="UTF-8"?><opml version="1.0"><head><title>Nexus Feeds</title></head><body>'
+    for f in feeds:
+        opml += f'<outline text="{f["title"]}" title="{f["title"]}" type="rss" xmlUrl="{f["url"]}" htmlUrl="{f["site_url"]}"/>'
+    opml += '</body></opml>'
+    
+    from flask import Response
+    return Response(opml, mimetype='text/xml', headers={"Content-Disposition": "attachment;filename=nexus_feeds.opml"})
+
+@app.route('/api/backup', methods=['GET'])
+def download_backup():
+    return send_file(DB_FILE, as_attachment=True)
 
 if __name__ == '__main__':
     if not os.path.exists(DB_FILE): init_db()
