@@ -460,7 +460,7 @@ HTML = """
                     </div>
                     <div>
                         <h1 class="font-black text-xl tracking-tight text-white leading-none">NEXUS</h1>
-                        <span class="text-[10px] font-bold text-indigo-400 uppercase tracking-widest">OS v9.2</span>
+                        <span class="text-[10px] font-bold text-indigo-400 uppercase tracking-widest">OS v0.1</span>
                     </div>
                 </div>
                 <button ng-click="openModal('add')" class="p-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/5 text-slate-400 hover:text-white transition-all shadow-sm">
