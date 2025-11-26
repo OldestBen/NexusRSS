@@ -295,6 +295,7 @@ def background_worker():
     conn = get_db()
     feeds = conn.execute("SELECT id, url, regex_filter, killfile_tags FROM feeds").fetchall()
     conn.close()
+    print(f"Fetching {len(feeds)} feeds...")
     for f in feeds:
         fetch_feed(f['id'], f['url'], f['regex_filter'], f['killfile_tags'])
 
@@ -459,7 +460,7 @@ HTML = """
                     </div>
                     <div>
                         <h1 class="font-black text-xl tracking-tight text-white leading-none">NEXUS</h1>
-                        <span class="text-[10px] font-bold text-indigo-400 uppercase tracking-widest">OS v9.0</span>
+                        <span class="text-[10px] font-bold text-indigo-400 uppercase tracking-widest">OS v9.2</span>
                     </div>
                 </div>
                 <button ng-click="openModal('add')" class="p-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/5 text-slate-400 hover:text-white transition-all shadow-sm">
@@ -518,7 +519,7 @@ HTML = """
                 <div class="space-y-2">
                     <div class="px-2 mb-3 flex justify-between items-center">
                         <span class="text-[10px] font-extrabold text-slate-500 uppercase tracking-widest opacity-70">Collections</span>
-                        <button ng-click="openModal('add')" class="text-slate-500 hover:text-white transition-colors" title="Add Collection"><icon name="'plus'" class="w-3 h-3"></icon></button>
+                        <button ng-click="openModal('addCollection')" class="text-slate-500 hover:text-white transition-colors" title="Add Collection"><icon name="'plus'" class="w-3 h-3"></icon></button>
                     </div>
                     <div ng-repeat="f in viewState.folders" ng-if="f.id !== 1 && f.id !== 999" class="nav-item group relative flex justify-between items-center group" ng-class="{'active': viewState.filter === 'folder:'+f.id}">
                         <div class="flex items-center w-full" ng-click="setFilter('folder:'+f.id)">
@@ -534,7 +535,7 @@ HTML = """
             <div class="p-4 border-t border-white/5 flex items-center justify-between text-slate-500 shrink-0 bg-black/10 backdrop-blur-md rounded-b-[32px]">
                 <div class="flex gap-1">
                     <button ng-click="openModal('settings')" class="p-2.5 hover:bg-white/10 rounded-xl transition-colors" title="Settings"><icon name="'settings'" class="w-5 h-5"></icon></button>
-                    <button ng-click="openModal('cmd')" class="p-2.5 hover:bg-white/10 rounded-xl transition-colors" title="Command (Cmd+K)"><icon name="'command'" class="w-5 h-5"></icon></button>
+                    <button ng-click="openModal('cmd')" class="p-2.5 hover:bg-white/10 rounded-xl transition-colors" title="Command"><icon name="'command'" class="w-5 h-5"></icon></button>
                 </div>
                 <button ng-click="refreshFeeds()" class="p-2.5 hover:bg-indigo-500/20 hover:text-indigo-400 rounded-xl transition-colors" ng-class="{'animate-spin': viewState.refreshing}" title="Refresh All">
                     <icon name="'refresh'" class="w-5 h-5"></icon>
@@ -890,6 +891,12 @@ HTML = """
                                 <a href="/api/opml/export" target="_blank" class="w-full py-3 rounded-xl border border-white/10 hover:bg-white/5 text-slate-300 hover:text-white text-sm font-medium transition-colors text-center">Export OPML</a>
                                 <div class="col-span-2">
                                     <label class="block w-full py-3 rounded-xl border border-white/10 hover:bg-white/5 text-slate-300 hover:text-white text-sm font-medium transition-colors text-center cursor-pointer">
+                                        Import Database
+                                        <input type="file" class="hidden" onchange="angular.element(this).scope().importDb(this)">
+                                    </label>
+                                </div>
+                                <div class="col-span-2">
+                                    <label class="block w-full py-3 rounded-xl border border-white/10 hover:bg-white/5 text-slate-300 hover:text-white text-sm font-medium transition-colors text-center cursor-pointer">
                                         Import OPML
                                         <input type="file" class="hidden" onchange="angular.element(this).scope().importOpml(this)">
                                     </label>
@@ -940,15 +947,32 @@ HTML = """
                                placeholder="https://..." ng-model="newFeed.url" auto-focus required />
                         <select class="w-full bg-black/30 border border-white/10 text-white rounded-2xl p-4 outline-none appearance-none" ng-model="newFeed.folder_id">
                             <option ng-repeat="f in viewState.folders" value="{{f.id}}">{{f.name}}</option>
-                            <option value="new">+ Create New Collection...</option>
                         </select>
-                        <input ng-if="newFeed.folder_id === 'new'" class="w-full bg-black/30 border border-white/10 text-white rounded-2xl p-4 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 outline-none transition-all placeholder-slate-600" 
-                               placeholder="Collection Name" ng-model="newFeed.new_folder_name" auto-focus />
                     </div>
                     <div class="flex justify-end gap-3 mt-8">
                         <button type="button" ng-click="closeModals()" class="px-6 py-3 text-slate-400 hover:text-white transition-colors font-medium">Cancel</button>
                         <button type="submit" class="px-8 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl font-bold shadow-lg shadow-indigo-500/25 transition-all transform active:scale-95">
                             Add Feed
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Add Collection Modal -->
+        <div ng-if="modals.addCollection" class="fixed inset-0 z-[60] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-ng" ng-click="closeModals()">
+            <div class="glass-panel bg-slate-900/90 rounded-[32px] w-full max-w-md p-8 shadow-2xl transform transition-all" ng-click="$event.stopPropagation()">
+                <h2 class="text-3xl font-black text-white mb-2 tracking-tight">New Collection</h2>
+                <p class="text-slate-400 mb-8">Create a new folder to organize your feeds.</p>
+                <form ng-submit="addCollection()">
+                    <div class="space-y-4">
+                        <input class="w-full bg-black/30 border border-white/10 text-white rounded-2xl p-4 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 outline-none transition-all placeholder-slate-600 text-lg" 
+                               placeholder="Collection Name" ng-model="newCollectionName" auto-focus required />
+                    </div>
+                    <div class="flex justify-end gap-3 mt-8">
+                        <button type="button" ng-click="closeModals()" class="px-6 py-3 text-slate-400 hover:text-white transition-colors font-medium">Cancel</button>
+                        <button type="submit" class="px-8 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl font-bold shadow-lg shadow-indigo-500/25 transition-all transform active:scale-95">
+                            Create
                         </button>
                     </div>
                 </form>
@@ -1010,7 +1034,7 @@ HTML = """
                     clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
                     folder: '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
                     settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.72l-.15.1a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.1a2 2 0 0 1-1-1.72v-.51a2 2 0 0 1 1-1.72l.15-.1a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" stroke-width="2" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" stroke-width="2" stroke-linejoin="round"/>',
-                    command: '<path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3H6a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0 3 3h12a3 3 0 0 0 3-3 3 3 0 0 0-3-3z"/>',
+                    command: '<rect x="4" y="4" width="16" height="16" rx="2" stroke-width="2"/><path d="M8 8h8v8H8z" stroke-width="2"/><path d="M12 8v8M8 12h8" stroke-width="2"/>',
                     eye: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',
                     zap: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
                     'chevron-left': '<polyline points="15 18 9 12 15 6"/>',
@@ -1041,8 +1065,9 @@ HTML = """
             $scope.activeItem = null;
             $scope.sidebarOpen = true;
             $scope.zenMode = false;
-            $scope.modals = { add: false, cmd: false, settings: false, shortcuts: false };
+            $scope.modals = { add: false, cmd: false, settings: false, shortcuts: false, addCollection: false };
             $scope.newFeed = { url: '', folder_id: '1', new_folder_name: '' };
+            $scope.newCollectionName = '';
             $scope.config = { 
                 bionic: false, 
                 theme: 'dark', 
@@ -1199,6 +1224,16 @@ HTML = """
                 });
             };
             
+            $scope.addCollection = function() {
+                if(!$scope.newCollectionName) return;
+                $http.post('/api/folders', {name: $scope.newCollectionName}).then(() => {
+                    $scope.showToast('Collection created');
+                    $scope.closeModals();
+                    $scope.fetchFolders();
+                    $scope.newCollectionName = '';
+                });
+            };
+            
             $scope.deleteFolder = function(id, $event) {
                 $event.stopPropagation();
                 if(confirm('Delete this collection? Feeds will move to General.')) {
@@ -1294,12 +1329,31 @@ HTML = """
             };
             
             $scope.copyLink = function() {
-                navigator.clipboard.writeText($scope.activeItem.link).then(() => $scope.showToast('Link Copied'));
+                // Fallback for non-secure contexts
+                if (navigator.clipboard && window.isSecureContext) {
+                    navigator.clipboard.writeText($scope.activeItem.link).then(() => $scope.showToast('Link Copied'));
+                } else {
+                    let textArea = document.createElement("textarea");
+                    textArea.value = $scope.activeItem.link;
+                    textArea.style.position = "fixed";
+                    textArea.style.left = "-9999px";
+                    textArea.style.top = "0";
+                    document.body.appendChild(textArea);
+                    textArea.focus();
+                    textArea.select();
+                    try {
+                        document.execCommand('copy');
+                        $scope.showToast('Link Copied');
+                    } catch (err) {
+                        $scope.showToast('Unable to copy', 'error');
+                    }
+                    document.body.removeChild(textArea);
+                }
             };
             
             $scope.shareArticle = function() {
                 if (navigator.share) {
-                    navigator.share({title: $scope.activeItem.title, url: $scope.activeItem.link});
+                    navigator.share({title: $scope.activeItem.title, url: $scope.activeItem.link}).catch(() => {});
                 } else {
                     $scope.copyLink();
                 }
@@ -1330,6 +1384,20 @@ HTML = """
                     $scope.showToast('OPML Imported');
                     $scope.fetchFolders();
                     $scope.fetchItems(true);
+                });
+            };
+
+             // Import DB
+            $scope.importDb = function(element) {
+                if(!confirm('This will overwrite your current database. Continue?')) return;
+                var fd = new FormData();
+                fd.append("file", element.files[0]);
+                $http.post("/api/db/import", fd, {
+                    headers: {'Content-Type': undefined},
+                    transformRequest: angular.identity
+                }).then(() => {
+                    $scope.showToast('Database Imported. Reloading...');
+                    setTimeout(() => window.location.reload(), 1000);
                 });
             };
 
@@ -1376,7 +1444,12 @@ HTML = """
                 $scope.modals[name] = true;
                 if(name === 'cmd') { $scope.cmdQuery = ''; $scope.filterCommands(); }
             };
-            $scope.closeModals = () => { $scope.modals.add = false; $scope.modals.cmd = false; $scope.modals.settings = false; };
+            $scope.closeModals = () => { 
+                $scope.modals.add = false; 
+                $scope.modals.cmd = false; 
+                $scope.modals.settings = false; 
+                $scope.modals.addCollection = false; 
+            };
 
             $scope.showToast = function(msg, type='success', title='') {
                 const id = Date.now();
@@ -1387,8 +1460,10 @@ HTML = """
             $scope.clearCache = function() { $scope.showToast('Cache Cleared', 'success'); };
             $scope.resetDb = function() { 
                 if(confirm('Are you sure? This will wipe everything.')) {
-                    $scope.showToast('Database Reset', 'success');
-                    setTimeout(() => window.location.reload(), 1000);
+                    $http.post('/api/db/reset').then(() => {
+                        $scope.showToast('Database Reset', 'success');
+                        setTimeout(() => window.location.reload(), 1000);
+                    });
                 }
             };
 
@@ -1573,6 +1648,26 @@ def export_opml():
 def download_backup():
     return send_file(DB_FILE, as_attachment=True)
 
+@app.route('/api/db/reset', methods=['POST'])
+def reset_db():
+    if os.path.exists(DB_FILE):
+        os.remove(DB_FILE)
+    init_db()
+    return jsonify(success=True)
+
+@app.route('/api/db/import', methods=['POST'])
+def import_db():
+    f = request.files['file']
+    f.save(DB_FILE)
+    return jsonify(success=True)
+
 if __name__ == '__main__':
     if not os.path.exists(DB_FILE): init_db()
-    app.run(host='0.0.0.0', port=PORT, debug=False)
+    
+    # Try to bind to port 5000, print friendly error if fail
+    try:
+        print("✅ Nexus Server Running on http://0.0.0.0:5000")
+        app.run(host='0.0.0.0', port=PORT, debug=False)
+    except OSError:
+        print(f"❌ Error: Port {PORT} is already in use. Stop the other process first.")
+        sys.exit(1)
