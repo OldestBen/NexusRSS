@@ -170,6 +170,7 @@ def init_db():
         user_comment TEXT, tags TEXT, 
         read_progress FLOAT DEFAULT 0,
         sentiment TEXT, ai_summary TEXT, read_time_min INTEGER,
+        image_url TEXT,
         UNIQUE(feed_id, guid)
     )''')
     
@@ -178,6 +179,10 @@ def init_db():
     c.execute('CREATE INDEX IF NOT EXISTS idx_items_read ON items(is_read)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_items_feed ON items(feed_id)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_items_pub ON items(published)')
+    
+    try: c.execute("ALTER TABLE items ADD COLUMN image_url TEXT")
+    except: pass
+    
     conn.commit()
     conn.close()
 
@@ -200,10 +205,18 @@ def calculate_read_time(text):
     return max(1, round(words / 200))
 
 def analyze_sentiment(text):
-    pos = {'awesome', 'good', 'great', 'amazing', 'love', 'profit', 'bull', 'growth', 'success'}
-    neg = {'bad', 'terrible', 'hate', 'loss', 'crash', 'crisis', 'warn', 'bear', 'dead', 'fail'}
+    pos_words = {
+        'awesome', 'good', 'great', 'amazing', 'love', 'profit', 'bull', 'growth', 'success', 'exciting', 
+        'breakthrough', 'innovative', 'positive', 'gain', 'win', 'victory', 'happy', 'celebrate', 'brilliant', 
+        'excellent', 'promising', 'recovery', 'surge', 'boost', 'benefit', 'strong', 'upgrade'
+    }
+    neg_words = {
+        'bad', 'terrible', 'hate', 'loss', 'crash', 'crisis', 'warn', 'bear', 'dead', 'fail', 'danger', 
+        'disaster', 'fear', 'risk', 'collapse', 'down', 'negative', 'problem', 'error', 'vulnerable', 
+        'attack', 'threat', 'decline', 'drop', 'weak', 'downgrade', 'recession', 'volatile'
+    }
     words = set(text.lower().split())
-    score = len(words & pos) - len(words & neg)
+    score = len(words & pos_words) - len(words & neg_words)
     if score > 0: return "positive"
     if score < 0: return "negative"
     return "neutral"
@@ -212,25 +225,33 @@ def auto_tag(text):
     text = text.lower()
     tags = []
     categories = {
-        'Tech': ['python', 'code', 'software', 'ai', 'linux', 'cyber', 'data', 'api', 'app'],
-        'Finance': ['market', 'stock', 'crypto', 'bitcoin', 'economy', 'bank', 'money'],
-        'Science': ['space', 'nasa', 'health', 'climate', 'physics', 'biology', 'study'],
-        'Politics': ['policy', 'election', 'law', 'senate', 'president', 'vote'],
-        'Gaming': ['game', 'nintendo', 'steam', 'playstation', 'xbox', 'release'],
-        'Design': ['ui', 'ux', 'css', 'font', 'color', 'art']
+        'Tech': ['python', 'code', 'software', 'ai', 'linux', 'cyber', 'data', 'api', 'app', 'web', 'cloud', 'server', 'database', 'algorithm', 'developer', 'programming'],
+        'Finance': ['market', 'stock', 'crypto', 'bitcoin', 'economy', 'bank', 'money', 'invest', 'trade', 'forex', 'nasdaq', 'inflation', 'fed', 'asset', 'wealth'],
+        'Science': ['space', 'nasa', 'health', 'climate', 'physics', 'biology', 'study', 'research', 'medical', 'vaccine', 'environment', 'energy', 'planet', 'evolution'],
+        'Politics': ['policy', 'election', 'law', 'senate', 'president', 'vote', 'government', 'congress', 'campaign', 'diplomacy', 'rights', 'justice'],
+        'Gaming': ['game', 'nintendo', 'steam', 'playstation', 'xbox', 'release', 'mod', 'esports', 'rpg', 'fps', 'console', 'switch', 'pc gaming'],
+        'Design': ['ui', 'ux', 'css', 'font', 'color', 'art', 'video', 'graphic', 'animation', 'creative', 'layout', 'typography', 'logo'],
+        'Security': ['malware', 'hack', 'breach', 'vulnerability', 'patch', 'firewall', 'ransomware', 'phishing', 'exploit', 'infosec'],
+        'Business': ['startup', 'ceo', 'acquisition', 'merger', 'ipo', 'revenue', 'strategy', 'management', 'hiring', 'layoff'],
+        'Entertainment': ['movie', 'film', 'music', 'show', 'series', 'netflix', 'hbo', 'disney', 'celebrity', 'album', 'song'],
+        'Lifestyle': ['food', 'travel', 'fitness', 'fashion', 'recipe', 'home', 'garden', 'wellness', 'yoga', 'workout']
     }
     for cat, keywords in categories.items():
         if any(k in text for k in keywords):
             tags.append(cat)
     return ",".join(tags)
 
-def fetch_all_feeds():
-    conn = get_db()
-    feeds = conn.execute("SELECT id, url, regex_filter, killfile_tags FROM feeds").fetchall()
-    conn.close()
-    print(f"Fetching {len(feeds)} feeds...")
-    for f in feeds:
-        fetch_feed(f['id'], f['url'], f['regex_filter'], f['killfile_tags'])
+def extract_image(entry, soup):
+    if 'media_content' in entry:
+        for m in entry.media_content:
+            if m.get('medium') == 'image' or m.get('type', '').startswith('image'): return m.get('url')
+    if 'media_thumbnail' in entry and len(entry.media_thumbnail) > 0: return entry.media_thumbnail[0].get('url')
+    if 'enclosures' in entry:
+        for enc in entry.enclosures:
+            if enc.get('type', '').startswith('image'): return enc.get('href')
+    img = soup.find('img')
+    if img and img.get('src'): return img.get('src')
+    return None
 
 def fetch_feed(feed_id, url, regex_filter=None, killfile=None):
     try:
@@ -261,13 +282,14 @@ def fetch_feed(feed_id, url, regex_filter=None, killfile=None):
                 soup = BeautifulSoup(content, "html.parser")
                 plain_text = soup.get_text()
                 
+                image_url = extract_image(e, soup)
                 read_time = calculate_read_time(plain_text)
                 sentiment = analyze_sentiment(plain_text)
                 tags = auto_tag(plain_text + " " + e.get('title', ''))
                 
-                conn.execute('''INSERT INTO items (feed_id, guid, title, link, summary, content, published, author, read_time_min, sentiment, tags) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                    (feed_id, guid, e.get('title', '(No Title)'), e.get('link'), plain_text[:300]+"...", content, pub, e.get('author', ''), read_time, sentiment, tags))
+                conn.execute('''INSERT INTO items (feed_id, guid, title, link, summary, content, published, author, read_time_min, sentiment, tags, image_url) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                    (feed_id, guid, e.get('title', '(No Title)'), e.get('link'), plain_text[:300]+"...", content, pub, e.get('author', ''), read_time, sentiment, tags, image_url))
                 count += 1
         conn.commit()
         conn.close()
@@ -280,7 +302,12 @@ def fetch_feed(feed_id, url, regex_filter=None, killfile=None):
         return 0
 
 def background_worker():
-    fetch_all_feeds()
+    conn = get_db()
+    feeds = conn.execute("SELECT id, url, regex_filter, killfile_tags FROM feeds").fetchall()
+    conn.close()
+    print(f"Fetching {len(feeds)} feeds...")
+    for f in feeds:
+        fetch_feed(f['id'], f['url'], f['regex_filter'], f['killfile_tags'])
 
 # --- App Setup ---
 logging.basicConfig(filename=LOG_FILE, level=logging.ERROR)
@@ -304,6 +331,7 @@ HTML = """
     <script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.8.2/angular-animate.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/mousetrap/1.6.5/mousetrap.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script>
         tailwind.config = {
             darkMode: 'class',
@@ -317,11 +345,13 @@ HTML = """
                     },
                     animation: { 
                         'slide-in-right': 'slideInRight 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
-                        'scale-in': 'scaleIn 0.2s ease-out'
+                        'scale-in': 'scaleIn 0.2s ease-out',
+                        'fade-in-up': 'fadeInUp 0.5s ease-out'
                     },
                     keyframes: {
                         slideInRight: { '0%': { transform: 'translateX(20px)', opacity: '0' }, '100%': { transform: 'translateX(0)', opacity: '1' } },
-                        scaleIn: { '0%': { transform: 'scale(0.95)', opacity: '0' }, '100%': { transform: 'scale(1)', opacity: '1' } }
+                        scaleIn: { '0%': { transform: 'scale(0.95)', opacity: '0' }, '100%': { transform: 'scale(1)', opacity: '1' } },
+                        fadeInUp: { '0%': { transform: 'translateY(20px)', opacity: '0' }, '100%': { transform: 'translateY(0)', opacity: '1' } }
                     }
                 }
             }
@@ -368,8 +398,11 @@ HTML = """
             transform: translateY(-2px) scale(1.005);
             box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3), 0 8px 10px -6px rgba(0, 0, 0, 0.2);
         }
-        .glass-card:hover::before { opacity: 1; }
 
+        /* Radius Customization */
+        .radius-square { border-radius: 4px !important; }
+        .radius-square .glass-card { border-radius: 2px !important; }
+        
         /* Angular Animate */
         .animate-fade-ng.ng-enter { transition: 0.3s ease-out; opacity: 0; transform: scale(0.98); }
         .animate-fade-ng.ng-enter-active { opacity: 1; transform: scale(1); }
@@ -413,12 +446,12 @@ HTML = """
         .accent-amber .bg-indigo-600 { background-color: #d97706 !important; }
 
         [ng-cloak] { display: none !important; }
-        ::-webkit-scrollbar { width: 0px; background: transparent; } /* Hidden scrollbar for pure liquid look */
+        ::-webkit-scrollbar { width: 0px; background: transparent; }
     </style>
 </head>
-<body ng-controller="MainController" ng-class="['accent-'+config.accent, {'sepia-theme': config.theme === 'sepia', 'dyslexic': config.font === 'dyslexic'}]" class="antialiased selection:bg-indigo-500/30" style="font-size: {{config.fontSize}}px; font-family: {{getFontFamily()}}">
+<body ng-controller="MainController" ng-class="['accent-'+config.accent, {'sepia-theme': config.theme === 'sepia', 'dyslexic': config.font === 'dyslexic', 'radius-square': config.radius === 'square'}]" class="antialiased selection:bg-indigo-500/30" style="font-size: {{config.fontSize}}px; font-family: {{getFontFamily()}}">
 
-    <div class="h-screen flex w-full p-4 gap-5 box-border">
+    <div class="h-screen flex w-full p-4 gap-5 box-border" ng-class="{'flex-row-reverse': config.sidebarSide === 'right'}">
         
         <!-- SIDEBAR TILE -->
         <aside class="glass-panel rounded-[32px] flex-col flex-shrink-0 transition-all duration-500 ease-in-out z-20 flex"
@@ -432,7 +465,7 @@ HTML = """
                     </div>
                     <div>
                         <h1 class="font-black text-xl tracking-tight text-white leading-none">NEXUS</h1>
-                        <span class="text-[10px] font-bold text-indigo-400 uppercase tracking-widest">OS v6.0</span>
+                        <span class="text-[10px] font-bold text-indigo-400 uppercase tracking-widest">OS v8.0</span>
                     </div>
                 </div>
                 <button ng-click="openModal('add')" class="p-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/5 text-slate-400 hover:text-white transition-all shadow-sm">
@@ -444,24 +477,36 @@ HTML = """
             <div class="flex-1 overflow-y-auto px-4 py-6 space-y-8">
                 
                 <!-- Smart Views -->
-                <div class="space-y-1">
-                    <div class="px-3 mb-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Smart Views</div>
-                    <div ng-click="setFilter('all')" class="nav-item group" ng-class="{'active': viewState.filter === 'all'}">
-                        <icon name="'inbox'" class="w-5 h-5 mr-3 transition-colors" ng-class="viewState.filter === 'all' ? 'text-white' : 'text-slate-500 group-hover:text-slate-300'"></icon>
-                        <span class="flex-1">Inbox</span>
-                        <span class="text-xs font-bold bg-indigo-500 text-white px-2 py-0.5 rounded-full shadow-sm shadow-indigo-500/50" ng-if="viewState.counts.all">{{viewState.counts.all}}</span>
+                <div class="space-y-2">
+                    <div class="px-2 mb-3 text-[10px] font-extrabold text-slate-500 uppercase tracking-widest opacity-70">Smart Views</div>
+                    
+                    <div ng-click="setFilter('all')" class="nav-item group relative" ng-class="{'active': viewState.filter === 'all'}">
+                        <div class="flex items-center w-full">
+                            <div class="w-8 flex justify-center"><icon name="'inbox'" class="w-5 h-5 transition-colors" ng-class="viewState.filter === 'all' ? 'text-white' : 'text-slate-500 group-hover:text-slate-300'"></icon></div>
+                            <span class="font-medium ml-1">Inbox</span>
+                        </div>
+                        <span class="text-xs font-bold bg-indigo-500 text-white px-2 py-0.5 rounded-full shadow-sm shadow-indigo-500/50 absolute right-3" ng-if="viewState.counts.all">{{viewState.counts.all}}</span>
                     </div>
-                    <div ng-click="viewDigest()" class="nav-item group">
-                        <icon name="'sun'" class="w-5 h-5 mr-3 transition-colors text-amber-400"></icon>
-                        <span>Daily Digest</span>
+
+                    <div ng-click="viewDigest()" class="nav-item group relative">
+                        <div class="flex items-center w-full">
+                            <div class="w-8 flex justify-center"><icon name="'sun'" class="w-5 h-5 transition-colors text-amber-400"></icon></div>
+                            <span class="font-medium ml-1">Daily Digest</span>
+                        </div>
                     </div>
-                    <div ng-click="setFilter('bookmarks')" class="nav-item group" ng-class="{'active': viewState.filter === 'bookmarks'}">
-                        <icon name="'star'" class="w-5 h-5 mr-3 transition-colors" ng-class="viewState.filter === 'bookmarks' ? 'text-yellow-400' : 'text-slate-500 group-hover:text-slate-300'"></icon>
-                        <span>Bookmarks</span>
+
+                    <div ng-click="setFilter('bookmarks')" class="nav-item group relative" ng-class="{'active': viewState.filter === 'bookmarks'}">
+                        <div class="flex items-center w-full">
+                            <div class="w-8 flex justify-center"><icon name="'star'" class="w-5 h-5 transition-colors" ng-class="viewState.filter === 'bookmarks' ? 'text-yellow-400' : 'text-slate-500 group-hover:text-slate-300'"></icon></div>
+                            <span class="font-medium ml-1">Bookmarks</span>
+                        </div>
                     </div>
-                    <div ng-click="setFilter('folder:999')" class="nav-item group" ng-class="{'active': viewState.filter === 'folder:999'}">
-                        <icon name="'clock'" class="w-5 h-5 mr-3 transition-colors" ng-class="viewState.filter === 'folder:999' ? 'text-emerald-400' : 'text-slate-500 group-hover:text-slate-300'"></icon>
-                        <span>Read Later</span>
+
+                    <div ng-click="setFilter('folder:999')" class="nav-item group relative" ng-class="{'active': viewState.filter === 'folder:999'}">
+                        <div class="flex items-center w-full">
+                            <div class="w-8 flex justify-center"><icon name="'clock'" class="w-5 h-5 transition-colors" ng-class="viewState.filter === 'folder:999' ? 'text-emerald-400' : 'text-slate-500 group-hover:text-slate-300'"></icon></div>
+                            <span class="font-medium ml-1">Read Later</span>
+                        </div>
                     </div>
                 </div>
 
@@ -469,13 +514,15 @@ HTML = """
                 <div class="h-px w-full bg-gradient-to-r from-transparent via-white/10 to-transparent"></div>
 
                 <!-- Collections -->
-                <div class="space-y-1">
-                    <div class="px-3 mb-2 flex justify-between items-center">
-                        <span class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Collections</span>
+                <div class="space-y-2">
+                    <div class="px-2 mb-3 flex justify-between items-center">
+                        <span class="text-[10px] font-extrabold text-slate-500 uppercase tracking-widest opacity-70">Collections</span>
                     </div>
-                    <div ng-repeat="f in viewState.folders" ng-click="setFilter('folder:'+f.id)" class="nav-item group" ng-class="{'active': viewState.filter === 'folder:'+f.id}">
-                        <icon name="'folder'" class="w-5 h-5 mr-3 text-slate-600 group-hover:text-slate-400 transition-colors"></icon>
-                        <span>{{f.name}}</span>
+                    <div ng-repeat="f in viewState.folders" ng-click="setFilter('folder:'+f.id)" class="nav-item group relative" ng-class="{'active': viewState.filter === 'folder:'+f.id}">
+                        <div class="flex items-center w-full">
+                            <div class="w-8 flex justify-center"><icon name="'folder'" class="w-5 h-5 text-slate-600 group-hover:text-slate-400 transition-colors"></icon></div>
+                            <span class="font-medium ml-1">{{f.name}}</span>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -526,26 +573,34 @@ HTML = """
                 <div class="mx-auto space-y-5 pb-24 transition-all duration-500" ng-class="{'max-w-3xl': zenMode, 'max-w-5xl': !zenMode}">
                     <div ng-repeat="item in viewState.items track by item.id" 
                          ng-click="openItem(item)"
-                         class="feed-item glass-card p-7 rounded-[24px] cursor-pointer relative group"
+                         class="feed-item glass-card p-7 rounded-[24px] cursor-pointer relative group overflow-hidden"
                          ng-class="{'opacity-50 grayscale': item.is_read, 'compact-card': config.density === 'compact'}">
                          
-                        <div class="flex justify-between items-start mb-4">
+                        <div class="flex justify-between items-start mb-4 relative z-10">
                             <div class="flex flex-wrap items-center gap-3 text-xs font-semibold text-slate-400">
                                 <div class="flex items-center gap-2 bg-slate-950/50 px-2 py-1 rounded-lg border border-white/5">
                                     <img ng-if="item.favicon" ng-src="{{item.favicon}}" class="w-3 h-3 rounded-sm opacity-80" onerror="this.style.display='none'"/>
                                     <span class="text-slate-300">{{item.feed_title}}</span>
                                 </div>
-                                <span>{{item.read_time_min}}m read</span>
-                                <!-- Smart Tags -->
-                                <span ng-if="item.tags" ng-repeat="tag in item.tags.split(',')" class="text-[10px] px-2 py-0.5 rounded-md border border-white/10 bg-white/5 text-indigo-300">{{tag}}</span>
+                                <span ng-if="config.showMetadata">{{item.read_time_min}}m read</span>
+                                <span ng-if="item.tags && config.showMetadata" ng-repeat="tag in item.tags.split(',')" class="text-[10px] px-2 py-0.5 rounded-md border border-white/10 bg-white/5 text-indigo-300">{{tag}}</span>
+                                <span ng-if="item.sentiment === 'positive' && config.showSentiment" class="text-emerald-400 bg-emerald-400/10 px-2 py-0.5 rounded text-[10px]">Positive</span>
+                                <span ng-if="item.sentiment === 'negative' && config.showSentiment" class="text-rose-400 bg-rose-400/10 px-2 py-0.5 rounded text-[10px]">Negative</span>
                             </div>
                         </div>
                         
-                        <h3 class="text-2xl font-bold text-slate-100 mb-3 group-hover:text-indigo-300 leading-tight transition-colors tracking-tight">{{item.title}}</h3>
-                        <p ng-if="config.density !== 'compact'" class="text-base text-slate-400 line-clamp-2 leading-relaxed opacity-80 font-light" ng-bind-html="cleanSummary(item.summary)"></p>
+                        <div class="flex gap-6">
+                            <div class="flex-1">
+                                <h3 class="text-2xl font-bold text-slate-100 mb-3 group-hover:text-indigo-300 leading-tight transition-colors tracking-tight relative z-10">{{item.title}}</h3>
+                                <p ng-if="config.density !== 'compact' && config.showSummary" class="text-base text-slate-400 line-clamp-2 leading-relaxed opacity-80 font-light relative z-10" ng-bind-html="cleanSummary(item.summary)"></p>
+                            </div>
+                            <div ng-if="item.image_url && config.showImages && config.density !== 'compact'" class="w-32 h-24 rounded-xl bg-black/20 overflow-hidden shrink-0">
+                                <img ng-src="{{item.image_url}}" class="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity">
+                            </div>
+                        </div>
                         
                         <!-- Actions -->
-                        <div class="absolute top-6 right-6 opacity-0 group-hover:opacity-100 transition-all duration-300 transform translate-x-2 group-hover:translate-x-0 flex gap-2">
+                        <div class="absolute top-6 right-6 opacity-0 group-hover:opacity-100 transition-all duration-300 transform translate-x-2 group-hover:translate-x-0 flex gap-2 z-20">
                             <button ng-click="toggleBookmark(item, $event)" 
                                     class="p-2.5 rounded-full bg-slate-950 border border-white/10 backdrop-blur-md hover:border-yellow-500/50 shadow-lg transition-all"
                                     ng-class="{'text-yellow-400 border-yellow-500/50 bg-yellow-900/10': item.is_bookmarked, 'text-slate-400': !item.is_bookmarked}">
@@ -566,14 +621,14 @@ HTML = """
             </div>
         </main>
 
-        <!-- ZEN MODE ESCAPE HATCH -->
-        <button ng-if="zenMode" ng-click="toggleZenMode()" class="fixed bottom-8 right-8 z-50 bg-slate-900/80 hover:bg-indigo-600 text-slate-400 hover:text-white p-4 rounded-full shadow-2xl border border-white/10 transition-all duration-300 group opacity-20 hover:opacity-100 backdrop-blur-md" title="Exit Zen Mode">
-            <icon name="'minimize'" class="w-6 h-6"></icon>
-        </button>
-
         <!-- READER OVERLAY -->
         <div ng-if="activeItem" class="reader-overlay fixed inset-0 z-50 flex flex-col bg-slate-950/95 backdrop-blur-3xl" ng-class="{'sepia-theme': config.theme === 'sepia'}">
-            <div class="h-20 flex items-center justify-between px-4 md:px-12 border-b border-white/5 z-50 bg-slate-950/80 backdrop-blur-md">
+            <!-- Hero Image Background -->
+            <div ng-if="activeItem.image_url" class="absolute top-0 left-0 w-full h-96 opacity-20 pointer-events-none mask-image-b-0">
+                <img ng-src="{{activeItem.image_url}}" class="w-full h-full object-cover blur-2xl">
+            </div>
+
+            <div class="h-20 flex items-center justify-between px-4 md:px-12 border-b border-white/5 z-50 bg-slate-950/80 backdrop-blur-md relative">
                 <button ng-click="closeItem()" class="p-3 -ml-2 rounded-full hover:bg-white/10 text-slate-400 hover:text-white transition-colors">
                     <icon name="'chevron-left'" class="w-6 h-6"></icon>
                 </button>
@@ -589,8 +644,15 @@ HTML = """
                 </div>
             </div>
 
-            <div class="flex-1 overflow-y-auto" id="reader-scroll">
-                <article class="max-w-3xl mx-auto px-6 py-20">
+            <div class="flex-1 overflow-y-auto relative" id="reader-scroll">
+                <article class="max-w-3xl mx-auto px-6 py-12 md:py-20 animate-fade-in-up">
+                    
+                    <!-- Hero Image -->
+                    <div ng-if="activeItem.image_url" class="mb-12 rounded-3xl overflow-hidden shadow-2xl border border-white/10 relative aspect-video group">
+                        <img ng-src="{{activeItem.image_url}}" class="w-full h-full object-cover transition-transform duration-700 group-hover:scale-105">
+                        <div class="absolute inset-0 bg-gradient-to-t from-slate-950/50 to-transparent"></div>
+                    </div>
+
                     <header class="mb-16 text-center">
                         <div class="flex items-center justify-center gap-3 text-sm text-slate-500 font-mono mb-8">
                             <span class="text-indigo-400 font-bold bg-indigo-400/10 px-3 py-1 rounded-full border border-indigo-400/20">{{ activeItem.feed_title }}</span>
@@ -602,8 +664,8 @@ HTML = """
                         </div>
                     </header>
 
-                    <div class="prose prose-invert prose-xl max-w-none prose-p:text-slate-300 prose-a:text-indigo-400 prose-headings:text-white prose-strong:text-white leading-loose" 
-                         ng-class="{'font-serif': config.fontSerif}" 
+                    <div class="prose prose-invert prose-xl max-w-none prose-p:text-slate-300 prose-a:text-indigo-400 prose-headings:text-white prose-strong:text-white"
+                         ng-class="{'font-serif': config.fontSerif, 'leading-relaxed': config.lineHeight === 'normal', 'leading-loose': config.lineHeight === 'loose'}" 
                          ng-bind-html="renderedContent">
                     </div>
                     
@@ -614,6 +676,11 @@ HTML = """
                 </article>
             </div>
         </div>
+
+        <!-- ZEN MODE ESCAPE HATCH -->
+        <button ng-if="zenMode" ng-click="toggleZenMode()" class="fixed bottom-8 right-8 z-50 bg-slate-900/80 hover:bg-indigo-600 text-slate-400 hover:text-white p-4 rounded-full shadow-2xl border border-white/10 transition-all duration-300 group opacity-20 hover:opacity-100 backdrop-blur-md" title="Exit Zen Mode">
+            <icon name="'minimize'" class="w-6 h-6"></icon>
+        </button>
 
         <!-- DAILY DIGEST OVERLAY -->
         <div ng-if="viewState.showDigest" class="reader-overlay fixed inset-0 z-50 flex flex-col bg-[#f4f1ea] text-[#2c2216]" style="font-family: 'Merriweather', serif;">
@@ -662,17 +729,38 @@ HTML = """
                     <!-- Sidebar -->
                     <div class="col-span-1 bg-black/20 border-r border-white/5 p-6 space-y-1">
                         <h2 class="text-xl font-bold text-white mb-6 px-2">Settings</h2>
-                        <button class="w-full text-left px-4 py-3 rounded-xl bg-white/5 text-white font-medium text-sm">General & Visuals</button>
-                        <button class="w-full text-left px-4 py-3 rounded-xl text-slate-400 hover:bg-white/5 hover:text-slate-200 transition-colors text-sm">Data & Storage</button>
-                        <button class="w-full text-left px-4 py-3 rounded-xl text-slate-400 hover:bg-white/5 hover:text-slate-200 transition-colors text-sm">About Nexus</button>
+                        <button ng-click="activeTab = 'general'" class="w-full text-left px-4 py-3 rounded-xl font-medium text-sm transition-colors" ng-class="activeTab === 'general' ? 'bg-white/5 text-white' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'">General</button>
+                        <button ng-click="activeTab = 'appearance'" class="w-full text-left px-4 py-3 rounded-xl font-medium text-sm transition-colors" ng-class="activeTab === 'appearance' ? 'bg-white/5 text-white' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'">Appearance</button>
+                        <button ng-click="activeTab = 'reading'" class="w-full text-left px-4 py-3 rounded-xl font-medium text-sm transition-colors" ng-class="activeTab === 'reading' ? 'bg-white/5 text-white' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'">Reading</button>
+                        <button ng-click="activeTab = 'feeds'" class="w-full text-left px-4 py-3 rounded-xl font-medium text-sm transition-colors" ng-class="activeTab === 'feeds' ? 'bg-white/5 text-white' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'">Feeds</button>
+                        <button ng-click="activeTab = 'system'" class="w-full text-left px-4 py-3 rounded-xl font-medium text-sm transition-colors" ng-class="activeTab === 'system' ? 'bg-white/5 text-white' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'">System</button>
                     </div>
                     
                     <!-- Content -->
-                    <div class="col-span-2 p-8 overflow-y-auto">
-                        <h3 class="text-xs font-bold text-indigo-400 uppercase tracking-wider mb-6">Interface Customization</h3>
+                    <div class="col-span-2 p-8 overflow-y-auto" ng-init="activeTab = 'general'">
                         
-                        <div class="space-y-8">
-                            <!-- Visuals -->
+                        <!-- General Tab -->
+                        <div ng-show="activeTab === 'general'" class="space-y-8 animate-fade-ng">
+                            <h3 class="text-xs font-bold text-indigo-400 uppercase tracking-wider mb-6">General Settings</h3>
+                            <div class="space-y-4">
+                                <label class="text-sm font-medium text-white">Sidebar Position</label>
+                                <div class="flex p-1 bg-black/20 rounded-xl border border-white/5">
+                                    <button ng-click="config.sidebarSide='left'; saveSettings()" class="flex-1 py-2 rounded-lg text-xs font-bold transition-all" ng-class="config.sidebarSide!=='right' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'">Left</button>
+                                    <button ng-click="config.sidebarSide='right'; saveSettings()" class="flex-1 py-2 rounded-lg text-xs font-bold transition-all" ng-class="config.sidebarSide==='right' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'">Right</button>
+                                </div>
+                            </div>
+                            <div class="space-y-4">
+                                <label class="text-sm font-medium text-white">Digest Timeframe (Days)</label>
+                                <div class="flex items-center gap-4">
+                                    <input type="range" min="1" max="7" ng-model="config.digestWindow" ng-change="saveSettings()" class="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer">
+                                    <span class="text-sm text-white font-mono w-8 text-center">{{config.digestWindow || 3}}</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Appearance Tab -->
+                        <div ng-show="activeTab === 'appearance'" class="space-y-8 animate-fade-ng">
+                            <h3 class="text-xs font-bold text-indigo-400 uppercase tracking-wider mb-6">Visual Customization</h3>
                             <div class="space-y-4">
                                 <label class="text-sm font-medium text-white">Theme</label>
                                 <div class="grid grid-cols-2 gap-3">
@@ -684,15 +772,6 @@ HTML = """
                                     </button>
                                 </div>
                             </div>
-
-                            <div class="space-y-4">
-                                <label class="text-sm font-medium text-white">Card Density</label>
-                                <div class="flex p-1 bg-black/20 rounded-xl border border-white/5">
-                                    <button ng-click="config.density='comfortable'; saveSettings()" class="flex-1 py-2 rounded-lg text-xs font-bold transition-all" ng-class="config.density=='comfortable' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'">Comfortable</button>
-                                    <button ng-click="config.density='compact'; saveSettings()" class="flex-1 py-2 rounded-lg text-xs font-bold transition-all" ng-class="config.density=='compact' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'">Compact</button>
-                                </div>
-                            </div>
-
                             <div class="space-y-4">
                                 <label class="text-sm font-medium text-white">Accent Color</label>
                                 <div class="flex gap-3">
@@ -702,10 +781,81 @@ HTML = """
                                     <button ng-click="config.accent='amber'; saveSettings()" class="w-8 h-8 rounded-full bg-amber-500 border-2 transition-transform active:scale-90" ng-class="config.accent=='amber' ? 'border-white' : 'border-transparent opacity-50 hover:opacity-100'"></button>
                                 </div>
                             </div>
+                             <div class="space-y-4">
+                                <label class="text-sm font-medium text-white">Border Radius</label>
+                                <div class="flex p-1 bg-black/20 rounded-xl border border-white/5">
+                                    <button ng-click="config.radius='round'; saveSettings()" class="flex-1 py-2 rounded-lg text-xs font-bold transition-all" ng-class="config.radius!=='square' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'">Rounded</button>
+                                    <button ng-click="config.radius='square'; saveSettings()" class="flex-1 py-2 rounded-lg text-xs font-bold transition-all" ng-class="config.radius==='square' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'">Square</button>
+                                </div>
+                            </div>
+                        </div>
 
-                            <div class="pt-6 border-t border-white/5">
-                                <h3 class="text-xs font-bold text-rose-400 uppercase tracking-wider mb-4">System</h3>
+                        <!-- Reading Tab -->
+                        <div ng-show="activeTab === 'reading'" class="space-y-8 animate-fade-ng">
+                            <h3 class="text-xs font-bold text-indigo-400 uppercase tracking-wider mb-6">Reading Experience</h3>
+                            <div class="flex items-center justify-between p-4 bg-white/5 rounded-xl border border-white/5">
+                                <div>
+                                    <div class="font-bold text-white">Bionic Reading</div>
+                                    <div class="text-xs text-slate-400">Highlights first letters for speed.</div>
+                                </div>
+                                <button ng-click="config.bionic = !config.bionic; saveSettings()" class="w-12 h-6 rounded-full transition-colors relative" ng-class="config.bionic ? 'bg-indigo-600' : 'bg-slate-700'">
+                                    <div class="w-4 h-4 bg-white rounded-full absolute top-1 transition-all" ng-class="config.bionic ? 'left-7' : 'left-1'"></div>
+                                </button>
+                            </div>
+                             <div class="space-y-4">
+                                <label class="text-sm font-medium text-white">Font Family</label>
+                                <select ng-model="config.font" ng-change="saveSettings()" class="w-full bg-black/20 border border-white/10 rounded-lg p-2 text-white">
+                                    <option value="inter">Inter (Default)</option>
+                                    <option value="serif">Merriweather (Serif)</option>
+                                    <option value="mono">JetBrains Mono</option>
+                                    <option value="dyslexic">OpenDyslexic</option>
+                                </select>
+                            </div>
+                            <div class="space-y-4">
+                                <label class="text-sm font-medium text-white">Reader Line Height</label>
+                                <div class="flex p-1 bg-black/20 rounded-xl border border-white/5">
+                                    <button ng-click="config.lineHeight='normal'; saveSettings()" class="flex-1 py-2 rounded-lg text-xs font-bold transition-all" ng-class="config.lineHeight!=='loose' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'">Normal</button>
+                                    <button ng-click="config.lineHeight='loose'; saveSettings()" class="flex-1 py-2 rounded-lg text-xs font-bold transition-all" ng-class="config.lineHeight==='loose' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'">Loose</button>
+                                </div>
+                            </div>
+                        </div>
+                        
+                         <!-- Feeds Tab -->
+                        <div ng-show="activeTab === 'feeds'" class="space-y-8 animate-fade-ng">
+                            <h3 class="text-xs font-bold text-indigo-400 uppercase tracking-wider mb-6">Feed List Options</h3>
+                             <div class="space-y-4">
+                                <label class="text-sm font-medium text-white">Card Density</label>
+                                <div class="flex p-1 bg-black/20 rounded-xl border border-white/5">
+                                    <button ng-click="config.density='comfortable'; saveSettings()" class="flex-1 py-2 rounded-lg text-xs font-bold transition-all" ng-class="config.density=='comfortable' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'">Comfortable</button>
+                                    <button ng-click="config.density='compact'; saveSettings()" class="flex-1 py-2 rounded-lg text-xs font-bold transition-all" ng-class="config.density=='compact' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'">Compact</button>
+                                </div>
+                            </div>
+                            <div class="space-y-2">
+                                <label class="flex items-center justify-between p-3 bg-white/5 rounded-xl border border-white/5 cursor-pointer">
+                                    <span class="text-sm text-slate-300">Show Images</span>
+                                    <input type="checkbox" ng-model="config.showImages" ng-change="saveSettings()" class="w-4 h-4 rounded bg-slate-800 border-slate-600 text-indigo-600 focus:ring-0">
+                                </label>
+                                <label class="flex items-center justify-between p-3 bg-white/5 rounded-xl border border-white/5 cursor-pointer">
+                                    <span class="text-sm text-slate-300">Show Summaries</span>
+                                    <input type="checkbox" ng-model="config.showSummary" ng-change="saveSettings()" class="w-4 h-4 rounded bg-slate-800 border-slate-600 text-indigo-600 focus:ring-0">
+                                </label>
+                                <label class="flex items-center justify-between p-3 bg-white/5 rounded-xl border border-white/5 cursor-pointer">
+                                    <span class="text-sm text-slate-300">Show Sentiment</span>
+                                    <input type="checkbox" ng-model="config.showSentiment" ng-change="saveSettings()" class="w-4 h-4 rounded bg-slate-800 border-slate-600 text-indigo-600 focus:ring-0">
+                                </label>
+                                <label class="flex items-center justify-between p-3 bg-white/5 rounded-xl border border-white/5 cursor-pointer">
+                                    <span class="text-sm text-slate-300">Show Metadata (Time/Tags)</span>
+                                    <input type="checkbox" ng-model="config.showMetadata" ng-change="saveSettings()" class="w-4 h-4 rounded bg-slate-800 border-slate-600 text-indigo-600 focus:ring-0">
+                                </label>
+                            </div>
+                        </div>
+
+                        <!-- System Tab -->
+                        <div ng-show="activeTab === 'system'" class="space-y-8 animate-fade-ng">
+                            <h3 class="text-xs font-bold text-rose-400 uppercase tracking-wider mb-6">Danger Zone</h3>
+                            <div class="space-y-4">
                                 <button ng-click="clearCache()" class="w-full py-3 rounded-xl border border-white/10 hover:bg-white/5 text-slate-400 hover:text-white text-sm font-medium transition-colors">Clear Cache & Reload</button>
+                                <button ng-click="resetDb()" class="w-full py-3 rounded-xl border border-rose-500/20 hover:bg-rose-500/10 text-rose-400 hover:text-rose-300 text-sm font-medium transition-colors">Reset Database</button>
                             </div>
                         </div>
                     </div>
@@ -759,13 +909,25 @@ HTML = """
             </div>
         </div>
 
+        <!-- Toast Notification -->
+        <div class="fixed bottom-8 right-8 z-[70] flex flex-col gap-2 pointer-events-none">
+            <div ng-repeat="toast in toasts" class="glass-panel bg-slate-900/90 border border-indigo-500/30 text-white px-5 py-4 rounded-2xl shadow-2xl flex items-center gap-4 animate-slide-up pointer-events-auto min-w-[300px]">
+                <div class="w-8 h-8 rounded-full flex items-center justify-center shrink-0" ng-class="toast.type === 'error' ? 'bg-rose-500/20 text-rose-400' : 'bg-emerald-500/20 text-emerald-400'">
+                    <icon name="toast.type === 'error' ? 'alert' : 'check'" class="w-5 h-5"></icon>
+                </div>
+                <div>
+                    <p class="text-sm font-bold">{{toast.title}}</p>
+                    <p class="text-xs text-slate-400 mt-0.5">{{toast.msg}}</p>
+                </div>
+            </div>
+        </div>
+
     </div>
 
     <!-- Styles for Angular Interactions -->
     <style>
-        .nav-item { @apply flex items-center px-4 py-3.5 rounded-2xl cursor-pointer transition-all text-sm font-bold text-slate-400 hover:bg-white/5 hover:text-slate-200 mb-1 border border-transparent; }
+        .nav-item { @apply rounded-2xl cursor-pointer transition-all text-sm text-slate-400 hover:bg-white/5 hover:text-slate-200 border border-transparent p-3; }
         .nav-item.active { @apply bg-indigo-600/10 text-indigo-300 border-indigo-500/20 shadow-lg shadow-indigo-500/5; }
-        
         .compact-card { @apply p-4; }
         .compact-card h3 { @apply text-base mb-1; }
         .compact-card p { @apply text-xs line-clamp-1; }
@@ -779,15 +941,15 @@ HTML = """
             controller: function($element) {
                 const icons = {
                     menu: '<path d="M4 6h16M4 12h16M4 18h16" stroke-width="2" stroke-linecap="round"/>',
-                    plus: '<path d="M12 4v16m8-12H4" stroke-width="2" stroke-linecap="round"/>',
+                    plus: '<path d="M12 5v14M5 12h14" stroke-width="2" stroke-linecap="round"/>',
                     check: '<path d="M20 6L9 17l-5-5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
                     star: '<path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" stroke-width="2" stroke-linejoin="round"/>',
                     'star-filled': '<path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" fill="currentColor" stroke="none"/>',
                     inbox: '<path d="M22 12h-6l-2 3h-4l-2-3H2v12h20V12z"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
                     clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
                     folder: '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
-                    settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
-                    command: '<path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3H6a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3h12a3 3 0 0 0 3-3 3 3 0 0 0-3-3z"/>',
+                    settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.72l-.15.1a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.1a2 2 0 0 1-1-1.72v-.51a2 2 0 0 1 1-1.72l.15-.1a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" stroke-width="2" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" stroke-width="2" stroke-linejoin="round"/>',
+                    command: '<path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3" stroke-width="2" stroke-linejoin="round"/>',
                     eye: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',
                     zap: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
                     'chevron-left': '<polyline points="15 18 9 12 15 6"/>',
@@ -815,7 +977,22 @@ HTML = """
             $scope.zenMode = false;
             $scope.modals = { add: false, cmd: false, settings: false };
             $scope.newFeed = { url: '', folder_id: '1' };
-            $scope.config = { bionic: false, theme: 'dark', font: 'inter', fontSize: 16, density: 'comfortable', accent: 'indigo' };
+            $scope.config = { 
+                bionic: false, 
+                theme: 'dark', 
+                font: 'inter', 
+                fontSize: 16, 
+                density: 'comfortable', 
+                accent: 'indigo',
+                sidebarSide: 'left',
+                radius: 'round',
+                showImages: true,
+                showSummary: true,
+                showSentiment: true,
+                showMetadata: true,
+                lineHeight: 'loose',
+                digestWindow: 3
+            };
             $scope.toasts = [];
             $scope.cmdQuery = '';
             $scope.allCommands = [];
@@ -826,7 +1003,16 @@ HTML = """
             // -- Settings & Persistence --
             $scope.loadSettings = function() {
                 $http.get('/api/settings').then(function(res) {
-                    if(res.data) $scope.config = {...$scope.config, ...res.data};
+                    if(res.data) {
+                        // Merge loaded settings with defaults to ensure new keys exist
+                        $scope.config = {...$scope.config, ...res.data};
+                        // Parse booleans correctly from backend
+                        ['bionic', 'showImages', 'showSummary', 'showSentiment', 'showMetadata'].forEach(k => {
+                            if (typeof $scope.config[k] === 'string') $scope.config[k] = $scope.config[k] === 'true';
+                        });
+                        $scope.config.fontSize = parseInt($scope.config.fontSize);
+                        $scope.config.digestWindow = parseInt($scope.config.digestWindow) || 3;
+                    }
                 });
             };
 
@@ -937,7 +1123,7 @@ HTML = """
                 });
             };
 
-            // -- Robust Bionic Reader --
+            // -- Robust Bionic Reader & Markdown --
             $scope.cleanSummary = function(html) {
                 return $sce.trustAsHtml(DOMPurify.sanitize(html, {ALLOWED_TAGS: []})); 
             };
@@ -945,6 +1131,9 @@ HTML = """
             $scope.renderContent = function() {
                 if (!$scope.activeItem) return;
                 let content = $scope.activeItem.content || $scope.activeItem.summary;
+                
+                // Parse Markdown first
+                content = marked.parse(content);
                 content = DOMPurify.sanitize(content); 
 
                 if ($scope.config.bionic) {
@@ -1077,13 +1266,16 @@ def get_items():
 @app.route('/api/digest')
 def get_digest():
     conn = get_db()
-    yesterday = datetime.now() - timedelta(days=1)
+    # Fetch setting
+    row = conn.execute("SELECT value FROM settings WHERE key='digestWindow'").fetchone()
+    days = int(row['value']) if row else 3
+    limit_date = datetime.now() - timedelta(days=days)
     query = """
         SELECT i.id, i.title, i.summary, i.link, i.published, f.title as feed_title
         FROM items i JOIN feeds f ON i.feed_id = f.id 
         WHERE i.published > ? ORDER BY i.published DESC LIMIT 20
     """
-    items = conn.execute(query, (yesterday,)).fetchall()
+    items = conn.execute(query, (limit_date,)).fetchall()
     conn.close()
     return jsonify([dict(i) for i in items])
 
